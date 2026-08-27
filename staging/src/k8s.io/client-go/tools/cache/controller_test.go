@@ -31,14 +31,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
+	clientgofeatures "k8s.io/client-go/features"
+	clientgofeaturestesting "k8s.io/client-go/features/testing"
 	fcache "k8s.io/client-go/tools/cache/testing"
 	"k8s.io/klog/v2/ktesting"
 
@@ -592,6 +597,105 @@ func TestTransformingInformer(t *testing.T) {
 	source.Delete(makePod("pod1", "2"))
 	verifyEvent(watch.Deleted, expectedPod("pod1", "2"), nil)
 	verifyStore([]interface{}{expectedPod("pod2", "2"), expectedPod("pod3", "1")})
+}
+func TestProcessLoopLogsProcessError(t *testing.T) {
+	var mu sync.Mutex
+	var captured []string
+	original := utilruntime.ErrorHandlers
+	utilruntime.ErrorHandlers = []utilruntime.ErrorHandler{
+		func(_ context.Context, err error, msg string, _ ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			captured = append(captured, msg+": "+err.Error())
+		},
+	}
+	t.Cleanup(func() { utilruntime.ErrorHandlers = original })
+
+	fifo := NewDeltaFIFOWithOptions(DeltaFIFOOptions{
+		KeyFunction: MetaNamespaceKeyFunc,
+	})
+	require.NoError(t, fifo.Add(&corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pod1"},
+	}))
+
+	watcher := watch.NewFakeWithChanSize(1, false)
+	cfg := &Config{
+		Queue: fifo,
+		ListerWatcher: &ListWatch{
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (apiruntime.Object, error) {
+				return &corev1.PodList{Items: nil}, nil
+			},
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+				return watcher, nil
+			},
+		},
+		Process: func(obj any, isInInitialList bool) error {
+			return fmt.Errorf("boom")
+		},
+	}
+	ctrl := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go ctrl.RunWithContext(ctx)
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		t.Errorf("captured: %s",captured)
+		return len(captured) > 0
+	}, time.Second, time.Millisecond)
+}
+
+func TestSharedIndexInformer(t *testing.T) {
+	clientgofeaturestesting.SetFeatureDuringTest(t, clientgofeatures.WatchListClient, false)
+	watcher := watch.NewFakeWithChanSize(1, false)
+	informer := NewSharedIndexInformerWithOptions(
+		&ListWatch{
+			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (apiruntime.Object, error) {
+				return &corev1.PodList{
+					Items: nil,
+				}, nil
+			},
+			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
+				return watcher, nil
+			},
+		},
+		&corev1.Pod{},
+		SharedIndexInformerOptions{
+			ResyncPeriod: time.Second * 60,
+			Indexers:     Indexers{NamespaceIndex: MetaNamespaceIndexFunc},
+		},
+	)
+	informer.SetTransform(func(obj interface{}) (interface{}, error) {
+		pod := obj.(*corev1.Pod)
+		if pod.Name == "pod2" {
+			return nil, fmt.Errorf("Don't know how to transform pod2")
+		}
+		return obj, nil
+	})
+	var wg wait.Group
+	stop := make(chan struct{})
+	wg.StartWithChannel(stop, informer.Run)
+	t.Cleanup(func() {
+		close(stop)
+		wg.Wait()
+	})
+
+	require.Eventually(t, informer.HasSynced, time.Second, time.Millisecond, "informer has synced")
+	watcher.Add(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod1"}})
+	watcher.Add(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod2"}})
+	watcher.Add(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod3"}})
+	podPresent := func() bool {
+		_, exist, err := informer.GetStore().GetByKey("pod3")
+		if err != nil {
+			return false
+		}
+		return exist
+	}
+	require.Eventually(t, podPresent, time.Second, time.Millisecond, "pod present")
+	keys := informer.GetStore().ListKeys()
+	assert.Equal(t, []string{"pod1", "pod2", "pod3"}, keys)
 }
 
 func TestTransformingInformerRace(t *testing.T) {
