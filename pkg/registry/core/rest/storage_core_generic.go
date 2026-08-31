@@ -70,6 +70,9 @@ type GenericConfig struct {
 	// storage itself; without this the resource would get two storages, and
 	// therefore two cachers and two etcd watches, for the same GroupResource.
 	skipServiceAccount bool
+	// EventStorageGetter is a getter function for limiting the event storage
+	// only initialize once.
+	EventStorageGetter eventstore.StorageGetter
 }
 
 func (c *GenericConfig) NewRESTStorage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) (genericapiserver.APIGroupInfo, error) {
@@ -91,7 +94,7 @@ func (c *GenericConfig) NewRESTStorage(apiResourceConfigSource serverstorage.API
 		apiGroupInfo.NegotiatedSerializer = serializer.NewCodecFactory(legacyscheme.Scheme, opts...)
 	}
 
-	eventStorage, err := eventstore.NewREST(restOptionsGetter, uint64(c.EventTTL.Seconds()))
+	eventStorage, err := c.EventStorageGetter(restOptionsGetter)
 	if err != nil {
 		return genericapiserver.APIGroupInfo{}, err
 	}

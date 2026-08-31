@@ -30,7 +30,8 @@ import (
 )
 
 type RESTStorageProvider struct {
-	TTL time.Duration
+	TTL           time.Duration
+	StorageGetter eventstore.StorageGetter
 }
 
 func (p RESTStorageProvider) NewRESTStorage(apiResourceConfigSource serverstorage.APIResourceConfigSource, restOptionsGetter generic.RESTOptionsGetter) (genericapiserver.APIGroupInfo, error) {
@@ -52,7 +53,7 @@ func (p RESTStorageProvider) v1Storage(apiResourceConfigSource serverstorage.API
 
 	// events
 	if resource := "events"; apiResourceConfigSource.ResourceEnabled(eventsapiv1.SchemeGroupVersion.WithResource(resource)) {
-		eventsStorage, err := eventstore.NewREST(restOptionsGetter, uint64(p.TTL.Seconds()))
+		eventsStorage, err := p.StorageGetter(restOptionsGetter)
 		if err != nil {
 			return storage, err
 		}

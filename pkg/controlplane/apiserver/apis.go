@@ -32,6 +32,7 @@ import (
 	authorizationrest "k8s.io/kubernetes/pkg/registry/authorization/rest"
 	certificatesrest "k8s.io/kubernetes/pkg/registry/certificates/rest"
 	coordinationrest "k8s.io/kubernetes/pkg/registry/coordination/rest"
+	eventstore "k8s.io/kubernetes/pkg/registry/core/event/storage"
 	corerest "k8s.io/kubernetes/pkg/registry/core/rest"
 	eventsrest "k8s.io/kubernetes/pkg/registry/events/rest"
 	flowcontrolrest "k8s.io/kubernetes/pkg/registry/flowcontrol/rest"
@@ -67,10 +68,16 @@ func (c *CompletedConfig) GenericStorageProviders(discovery discovery.DiscoveryI
 	// the order of this list determines which group an unqualified resource name (e.g. "deployments") should prefer.
 	// This priority order is used for local discovery, but it ends up aggregated in `k8s.io/kubernetes/cmd/kube-apiserver/app/aggregator.go
 	// with specific priorities.
+	eventStorageGetter := eventstore.NewStorageGetter(c.EventTTL)
+
+	coreGenericConfig := c.NewCoreGenericConfig()
+	coreGenericConfig.EventStorageGetter = eventStorageGetter
+
 	// TODO: describe the priority all the way down in the RESTStorageProviders and plumb it back through the various discovery
 	// handlers that we have.
+
 	return []RESTStorageProvider{
-		c.NewCoreGenericConfig(),
+		coreGenericConfig,
 		apiserverinternalrest.StorageProvider{},
 		authenticationrest.RESTStorageProvider{Authenticator: c.Generic.Authentication.Authenticator, APIAudiences: c.Generic.Authentication.APIAudiences},
 		authorizationrest.RESTStorageProvider{Authorizer: c.Generic.Authorization.Authorizer, RuleResolver: c.Generic.RuleResolver},
@@ -80,7 +87,7 @@ func (c *CompletedConfig) GenericStorageProviders(discovery discovery.DiscoveryI
 		svmrest.RESTStorageProvider{},
 		flowcontrolrest.RESTStorageProvider{InformerFactory: c.Generic.SharedInformerFactory},
 		admissionregistrationrest.RESTStorageProvider{Authorizer: c.Generic.Authorization.Authorizer, DiscoveryClient: discovery},
-		eventsrest.RESTStorageProvider{TTL: c.EventTTL},
+		eventsrest.RESTStorageProvider{TTL: c.EventTTL, StorageGetter: eventStorageGetter},
 	}, nil
 }
 

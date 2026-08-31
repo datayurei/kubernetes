@@ -17,6 +17,9 @@ limitations under the License.
 package storage
 
 import (
+	"sync"
+	"time"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apiserver/pkg/registry/generic"
 	genericregistry "k8s.io/apiserver/pkg/registry/generic/registry"
@@ -31,6 +34,20 @@ import (
 // REST implements a RESTStorage for events.
 type REST struct {
 	*genericregistry.Store
+}
+
+type StorageGetter func(generic.RESTOptionsGetter) (*REST, error)
+
+func NewStorageGetter(ttl time.Duration) StorageGetter {
+	var (
+		once    sync.Once
+		storage *REST
+		err     error
+	)
+	return func(optsGetter generic.RESTOptionsGetter) (*REST, error) {
+		once.Do(func() { storage, err = NewREST(optsGetter, uint64(ttl.Seconds())) })
+		return storage, err
+	}
 }
 
 // NewREST returns a RESTStorage object that will work against events.
